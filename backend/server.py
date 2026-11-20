@@ -12,7 +12,7 @@ from google.genai import types
 
 WORK = Path("/tmp/cliptool")
 WORK.mkdir(parents=True, exist_ok=True)
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-flash-latest"
 MAX_CLIPS = 3
 COOKIES = Path("/etc/secrets/cookies.txt")
 
