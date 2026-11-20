@@ -74,7 +74,6 @@ def download_video(url: str, dest: Path):
         "-o", str(dest),
     ]
     if COOKIES.exists():
-        # Read-only file ki copy banate hain, taaki yt-dlp usme likh sake
         cookie_copy = dest.parent / "cookies_copy.txt"
         shutil.copyfile(COOKIES, cookie_copy)
         cmd += ["--cookies", str(cookie_copy)]
@@ -88,4 +87,79 @@ def cut_clip(src: Path, start: float, end: float, workdir: Path, ass_name: str, 
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{end - start:.2f}",
-        "-vf", f"scale=-2:19
+        "-vf", f"scale=-2:1920,crop=1080:1920,subtitles={ass_name}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    r = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr[-400:])
+
+
+def run_pipeline(client, job: Path, src: Path, contents):
+    try:
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        data = json.loads(resp.text)
+    except Exception as e:
+        raise HTTPException(500, f"AI step failed: {e}")
+
+    results = []
+    for i, clip in enumerate(data.get("clips", [])[:MAX_CLIPS], start=1):
+        start, end = float(clip["start"]), float(clip["end"])
+        if end <= start:
+            continue
+        ass = job / f"captions{i}.ass"
+        out = job / f"clip{i}.mp4"
+        write_ass(clip.get("captions", []), start, ass)
+        try:
+            cut_clip(src, start, end, job, ass.name, out)
+        except RuntimeError as e:
+            raise HTTPException(500, f"Video cutting failed: {e}")
+        results.append({
+            "title": clip.get("title", f"Clip {i}"),
+            "url": f"/files/{job.name}/{out.name}",
+        })
+
+    if not results:
+        raise HTTPException(500, "AI ko koi clip nahi mila.")
+
+    src.unlink(missing_ok=True)
+    return JSONResponse({"clips": results})
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/process")
+async def process(url: str = Form(...)):
+    if "youtube.com" not in url and "youtu.be" not in url:
+        raise HTTPException(400, "YouTube ka link daaliye.")
+    if shutil.which("ffmpeg") is None or shutil.which("yt-dlp") is None:
+        raise HTTPException(500, "FFmpeg ya yt-dlp server par installed nahi hai.")
+    client = get_client()
+
+    job = WORK / uuid.uuid4().hex[:10]
+    job.mkdir(parents=True)
+    src = job / "source.mp4"
+    download_video(url, src)
+
+    return run_pipeline(client, job, src, [
+        types.Part(file_data=types.FileData(file_uri=url)),
+        PROMPT.replace("{n}", str(MAX_CLIPS)),
+    ])
+
+
+@app.get("/files/{job}/{name}")
+def get_file(job: str, name: str):
+    path = WORK / job / name
+    if not path.is_file():
+        raise HTTPException(404, "Not found.")
+    return FileResponse(path, media_type="video/mp4", filename=name)
