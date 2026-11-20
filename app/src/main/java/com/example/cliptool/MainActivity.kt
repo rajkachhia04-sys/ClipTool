@@ -138,7 +138,7 @@ fun requestClips(youtubeLink: String): List<ClipItem> {
         requestMethod = "POST"
         doOutput = true
         connectTimeout = 30_000
-        readTimeout = 15 * 60_000
+        readTimeout = 30 * 60_000
         setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
     }
 
