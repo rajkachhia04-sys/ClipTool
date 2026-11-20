@@ -1,20 +1,21 @@
 import json
+import os
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from google import genai
 from google.genai import types
-
-import os
 
 WORK = Path("/tmp/cliptool")
 WORK.mkdir(parents=True, exist_ok=True)
 MODEL = "gemini-2.5-flash"
 MAX_CLIPS = 3
+COOKIES = Path("/etc/secrets/cookies.txt")
 
 app = FastAPI(title="Clip Tool AI")
 
@@ -72,9 +73,11 @@ def download_video(url: str, dest: Path):
         "-f", "mp4[height<=720]/best[height<=720]",
         "--merge-output-format", "mp4",
         "-o", str(dest),
-        url,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if COOKIES.exists():
+        cmd += ["--cookies", str(COOKIES)]
+    cmd.append(url)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if r.returncode != 0 or not dest.exists():
         raise HTTPException(400, "Video download nahi hua: " + r.stderr[-300:])
 
@@ -94,31 +97,11 @@ def cut_clip(src: Path, start: float, end: float, workdir: Path, ass_name: str, 
         raise RuntimeError(r.stderr[-400:])
 
 
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-
-@app.post("/process")
-async def process(url: str = Form(...)):
-    if "youtube.com" not in url and "youtu.be" not in url:
-        raise HTTPException(400, "YouTube ka link daaliye.")
-    if shutil.which("ffmpeg") is None or shutil.which("yt-dlp") is None:
-        raise HTTPException(500, "FFmpeg ya yt-dlp server par installed nahi hai.")
-    client = get_client()
-
-    job = WORK / uuid.uuid4().hex[:10]
-    job.mkdir(parents=True)
-    src = job / "source.mp4"
-    download_video(url, src)
-
+def run_pipeline(client, job: Path, src: Path, contents):
     try:
         resp = client.models.generate_content(
             model=MODEL,
-            contents=[
-                types.Part(file_data=types.FileData(file_uri=url)),
-                PROMPT.replace("{n}", str(MAX_CLIPS)),
-            ],
+            contents=contents,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         data = json.loads(resp.text)
@@ -147,6 +130,30 @@ async def process(url: str = Form(...)):
 
     src.unlink(missing_ok=True)
     return JSONResponse({"clips": results})
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/process")
+async def process(url: str = Form(...)):
+    if "youtube.com" not in url and "youtu.be" not in url:
+        raise HTTPException(400, "YouTube ka link daaliye.")
+    if shutil.which("ffmpeg") is None or shutil.which("yt-dlp") is None:
+        raise HTTPException(500, "FFmpeg ya yt-dlp server par installed nahi hai.")
+    client = get_client()
+
+    job = WORK / uuid.uuid4().hex[:10]
+    job.mkdir(parents=True)
+    src = job / "source.mp4"
+    download_video(url, src)
+
+    return run_pipeline(client, job, src, [
+        types.Part(file_data=types.FileData(file_uri=url)),
+        PROMPT.replace("{n}", str(MAX_CLIPS)),
+    ])
 
 
 @app.get("/files/{job}/{name}")
