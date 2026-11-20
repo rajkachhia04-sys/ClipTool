@@ -12,7 +12,6 @@ from google.genai import types
 
 WORK = Path("/tmp/cliptool")
 WORK.mkdir(parents=True, exist_ok=True)
-MODEL = "gemini-flash-latest"
 MAX_CLIPS = 3
 COOKIES = Path("/etc/secrets/cookies.txt")
 
@@ -34,6 +33,24 @@ def get_client():
     if not key:
         raise HTTPException(500, "GEMINI_API_KEY is not set on the server.")
     return genai.Client(api_key=key)
+
+
+def pick_model(client) -> str:
+    """Google se available models ki list leta hai aur sabse nayi flash model chunta hai."""
+    names = []
+    for m in client.models.list():
+        name = (m.name or "").replace("models/", "")
+        actions = m.supported_actions or []
+        if "generateContent" not in actions and actions:
+            continue
+        if "flash" not in name:
+            continue
+        if any(x in name for x in ("lite", "image", "tts", "live", "latest", "preview")):
+            continue
+        names.append(name)
+    if not names:
+        raise HTTPException(500, "Koi suitable Gemini flash model nahi mila.")
+    return sorted(names, reverse=True)[0]
 
 
 def ass_time(sec: float) -> str:
@@ -99,15 +116,16 @@ def cut_clip(src: Path, start: float, end: float, workdir: Path, ass_name: str, 
 
 
 def run_pipeline(client, job: Path, src: Path, contents):
+    model = pick_model(client)
     try:
         resp = client.models.generate_content(
-            model=MODEL,
+            model=model,
             contents=contents,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         data = json.loads(resp.text)
     except Exception as e:
-        raise HTTPException(500, f"AI step failed: {e}")
+        raise HTTPException(500, f"AI step failed ({model}): {e}")
 
     results = []
     for i, clip in enumerate(data.get("clips", [])[:MAX_CLIPS], start=1):
